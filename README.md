@@ -1,1 +1,1 @@
-# 2026-GMP-ATAC-seq
+# 2026-Atherosclerosis_S.pneumoniae
