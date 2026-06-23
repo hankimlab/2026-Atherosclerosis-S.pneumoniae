@@ -1,1 +1,1 @@
-# 2026-Atherosclerosis_S.pneumoniae
+# 2026-Atherosclerosis-S.pneumoniae
