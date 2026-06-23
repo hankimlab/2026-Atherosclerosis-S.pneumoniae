@@ -1,0 +1,78 @@
+---
+title: "Pneumonia_Recovery"
+output: html_document
+date: "2026-06-23"
+---
+
+```{r}
+
+# multiBigwigSummary BED-file \ 
+#   --bwfiles \
+# "$BW_BM_PN_R1" "$BW_BM_PN_R2" "$BW_BM_PN_R3" \
+# "$BW_BM_SA_R1" "$BW_BM_SA_R2" "$BW_BM_SA_R3" \
+#   --labels BM_Pn_r1 BM_Pn_r2 BM_Pn_r3 BM_Sa_r1 BM_Sa_r2 BM_Sa_r3 \
+#   --BED "$BED" \
+#   --outRawCounts "$OUTDIR/BM_selectedgenes_mean.tsv" \
+#   -out "$OUTDIR/BM_selectedgenes_mean.npz"
+
+# load libraries
+library(readr)
+library(dplyr)
+library(pheatmap)
+library(scales)
+
+bm <- read_tsv("BM_selectedgenes_mean.tsv")
+colnames(bm) <- gsub("'", "", colnames(bm))
+colnames(bm)[1:3] <- c("chr", "start", "end")
+
+# coordinates -> gene names
+gene_order <- tribble(
+  ~chr, ~start, ~end, ~Gene,
+  "chr7", 19701501,19701600,"Tomm40",
+  "chr7", 19227651,19227700,"Opa3",
+  "chr15", 78256801,78256850,"Ncf4",
+  "chr1", 40116601,40116650,"Il1r2",
+  "chr4", 140902601,140902650,"Padi2",
+  "chr5", 17776751,17776800,"Cd36",
+  "chr1", 128552801,128552850,"Cxcr4",
+  "chr7", 140921401,140921450,"Nlrp6",
+  "chr6", 134526551,134526600,"Lrp6",
+  "chr16", 23224740,23360348,"St6gal1",
+  "chr9", 44580251,44580300,"Cxcr5",
+  "chr10",19062751,19062800,"Tnfaip3",
+  "chr4", 140854651,140854700,"Padi1"
+)
+
+# join file with mapping to add gene names
+bm_named <- bm %>%
+  inner_join(gene_order, by = c("chr","start","end"))
+
+# reorder rows & columns
+bm_named$Gene <- factor(bm_named$Gene, levels = gene_order$Gene)
+bm_named <- bm_named %>% arrange(Gene)
+bm_named <- bm_named %>%
+  select(chr, start, end, Gene,
+         BM_Sa_r1, BM_Sa_r2, BM_Sa_r3,
+         BM_Pn_r1, BM_Pn_r2, BM_Pn_r3)
+
+# extract matrix & scale
+mat <- as.matrix(bm_named %>% select(starts_with("BM_")))
+rownames(mat) <- bm_named$Gene
+mat_scaled <- t(scale(t(scale(mat))))
+
+pdf("20260227_heatmap_purple.pdf", width = 6.5, height = 8)
+
+pheatmap(
+  mat_scaled,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  color = colorRampPalette(c("#efedf5","#9e9ac8","#3f007d"))(100),
+  angle_col=90,
+  border_color = NA,
+  labels_row = parse(text = paste0("italic('", rownames(mat_scaled), "')"))
+)
+
+dev.off()
+
+```
+

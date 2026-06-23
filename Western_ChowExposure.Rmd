@@ -1,0 +1,259 @@
+---
+title: "Western_ChowExposure"
+output: html_document
+date: "2026-06-23"
+---
+
+# pathway enrichment
+```{r}
+
+library(readxl)
+library(tidyverse)
+library(pheatmap)
+library(ggrepel)
+library(readr)
+library(tibble)
+
+fp2 <- "WesternRevert_vs_Chow12w.Enrichr_H+C2+C5_table.max5kb.xlsx"
+
+# read both enrichment result sheets
+enrich_down <- read_excel(fp2, sheet = "Down", .name_repair = "unique")
+enrich_up   <- read_excel(fp2, sheet = "Up", .name_repair = "unique")
+
+# add explicit labels
+enrich_down <- mutate(enrich_down, Direction = "Down")
+enrich_up   <- mutate(enrich_up, Direction = "Up")
+
+# combine
+enrich_all <- bind_rows(enrich_up, enrich_down)
+
+keep_ids <- c(
+  "GOBP_POSITIVE_REGULATION_OF_PHOSPHATIDYLINOSITOL_3-KINASE_SIGNALING",
+  "GOBP_POSITIVE_REGULATION_OF_LIPID_KINASE_ACTIVITY",
+  "GOBP_TISSUE_REMODELING",
+  "REACTOME_DISEASES_OF_PROGRAMMED_CELL_DEATH",
+  "REACTOME_DNA_METHYLATION",
+  "BLANCO_MELO_COVID19_SARS_COV_2_INFECTION_A594_ACE2_EXPRESSING_CELLS_RUXOLITINIB_UP"
+)
+
+plot_df <- enrich_all %>%
+  filter(ID %in% keep_ids) %>%
+  group_by(ID) %>%
+  slice_max(order_by = FoldEnrichment, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(
+    side_fe = if_else(Direction == "Down", -FoldEnrichment, FoldEnrichment),
+    ID_label = str_replace_all(ID, "_", " ")
+  )
+
+# order pathways by max FoldEnrichment so the strongest is at the top
+id_order <- plot_df %>%
+  group_by(ID_label) %>%
+  summarise(max_fe = max(FoldEnrichment, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(max_fe)) %>%
+  pull(ID_label)
+
+plot_df <- plot_df %>%
+  mutate(ID_label = factor(ID_label, levels = rev(id_order)))
+
+fe_breaks <- pretty(c(-max(plot_df$FoldEnrichment), max(plot_df$FoldEnrichment)), n = 4)
+fe_max <- max(abs(plot_df$side_fe), na.rm = TRUE)
+
+p <-
+  ggplot(plot_df, aes(x = side_fe, y = ID_label, fill = Direction)) +
+  geom_col(width = 0.75) +
+  geom_text(
+    aes(label = sprintf("%.2f", FoldEnrichment)),
+    size = 3,
+    vjust = 0.5,
+    hjust = if_else(plot_df$Direction == "Down", 1, 0),
+    nudge_x = if_else(plot_df$Direction == "Down",-0.03 * fe_max, 0.03 * fe_max)
+  ) +
+  geom_vline(xintercept = 0,
+             linewidth = 0.6,
+             linetype = "22") +
+  scale_x_continuous(
+    breaks = fe_breaks,
+    labels = function(x)
+      abs(x),
+    expand = expansion(mult = c(0.05, 0.1))
+  ) +
+  scale_fill_manual(
+    values = c(Up = "#588157", Down = "#ae2012"),
+    labels = c("", "")
+  ) +
+  labs(x = "Fold enrichment",
+       y = NULL,
+       fill = NULL,
+       title = "Pathway enrichment") +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.line.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.position = "top",
+    plot.title.position = "plot"
+  )
+
+library(svglite)
+
+svglite("PathwayEnrichment_WRvsChow.svg", width = 12, height = 5)
+print(p)
+dev.off()
+
+```
+
+# motif analysis - load and process
+```{r}
+
+file <- "Summary.Contrasts.TF_motif_enrichment.Direction_comp.xlsx"
+
+sheets_use <- c(
+  "08w_Western_vs_Chow",
+  "WesternRevert_vs_Chow12w",
+  "WesternRevert_vs_Western8w"
+)
+
+modified <- c(
+  "Western vs Chow",
+  "Revert vs Chow12w",
+  "Revert vs Western"
+)
+
+names(sheets_use) <- modified
+
+# read all sheets as text first
+df_list <- lapply(names(sheets_use), function(nm) {
+  read_excel(file, sheet = sheets_use[[nm]], col_types = "text") %>%
+    mutate(Contrast = nm)
+})
+
+motifs <- bind_rows(df_list)
+
+# clean and score (log2 enrichment)
+motifs <- motifs %>%
+  mutate(
+    across(
+      c(
+        Pval, Qval, Eval,
+        target.hits, target.seq.hits, target.seq.count,
+        bkg.hits, bkg.seq.hits, bkg.seq.count,
+        pct.target.seq.hits, pct.bkg.seq.hits,
+        target.enrichment, Enrichment
+      ),
+      ~ parse_number(.x)
+    ),
+    TF_name = if_else(is.na(TF_name) | TF_name == "", motif, TF_name),
+    Direction = str_trim(Direction),
+    score = case_when(
+      Direction == "UP_vs_DOWN" ~ log2(Enrichment),
+      Direction == "DOWN_vs_UP" ~ -log2(Enrichment),
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  filter(!is.na(score), !is.na(Qval), !is.na(Enrichment), is.finite(score))
+
+# keep strongest motif per TF per contrast
+motifs_best <- motifs %>%
+  group_by(Contrast, TF_name) %>%
+  slice_max(order_by = abs(score), n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+```
+
+# motif clustering and heatmap
+```{r}
+
+heat_tfs <- motifs_best %>%
+  filter(Qval < 0.05) %>%
+  group_by(TF_name) %>%
+  summarise(max_abs = max(abs(score), na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(max_abs)) %>%
+  slice_head(n = 30) %>%
+  pull(TF_name)
+
+heat_mat <- motifs_best %>%
+  filter(TF_name %in% heat_tfs) %>%
+  select(TF_name, Contrast, score) %>%
+  pivot_wider(names_from = Contrast, values_from = score, values_fill = 0) %>%
+  column_to_rownames("TF_name") %>%
+  as.matrix()
+
+contrast_order <- c(
+  "Western vs Chow",
+  "Revert vs Western",
+  "Revert vs Chow12w"
+)
+
+heat_mat <- motifs_best %>%
+  filter(
+    Contrast %in% contrast_order,
+    TF_name %in% heat_tfs
+  ) %>%
+  mutate(
+    Contrast = factor(Contrast, levels = contrast_order)
+  ) %>%
+  select(TF_name, Contrast, score) %>%
+  pivot_wider(
+    names_from = Contrast,
+    values_from = score,
+    values_fill = 0
+  ) %>%
+  column_to_rownames("TF_name") %>%
+  as.matrix()
+
+heat_mat <- heat_mat[, contrast_order]
+
+pdf("20260615_motif_heatmap.pdf", width = 6.5, height = 8)
+
+pheatmap(
+  heat_mat,
+  scale = "row",
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  fontsize_row = 9,
+  color = colorRampPalette(c('#576bc0', '#FFFFFF', '#ca2837'))(50),
+  angle_col=90,
+  border_color = 'black'
+)
+
+dev.off()
+
+```
+
+# scatterplot comparing Revert vs Western
+```{r}
+
+scatter_df <- motifs_best %>%
+  select(TF_name, Contrast, score) %>%
+  pivot_wider(names_from = Contrast, values_from = score, values_fill = 0)
+
+p <- ggplot(
+  scatter_df,
+  aes(x = `Western vs Chow`, y = `Revert vs Western`)
+) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  geom_point(alpha = 0.7, size = 2) +
+  geom_text_repel(
+    data = scatter_df %>%
+      filter(abs(`Western vs Chow`) > 0.8 | abs(`Revert vs Western`) > 0.8),
+    aes(label = TF_name),
+    size = 4
+  ) +
+  theme_bw(base_size = 12) +
+  labs(
+    title = "",
+    x = "Western vs Chow (log2 enrichment)",
+    y = "Revert vs Western (log2 enrichment)"
+  ) + 
+  theme(panel.grid=element_blank())
+
+ggsave(
+  filename = "20260615_motif_scatterplot_westernvschow_revertvswestern.pdf",
+  plot = p,
+  width = 11,
+  height = 11
+)
+
+```
+
